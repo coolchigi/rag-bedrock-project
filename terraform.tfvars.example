@@ -1,0 +1,26 @@
+# Example Terraform variables file
+# Copy this file to terraform.tfvars and update with your values
+
+# AWS Region where resources will be deployed
+aws_region = "us-east-1"
+
+# Project name (used as prefix for resource names)
+project_name = "rag-bedrock"
+
+# Environment name
+environment = "dev"
+
+# S3 bucket name for storing PDF documents
+# Must be globally unique across all AWS accounts
+s3_bucket_name = "your-unique-bucket-name-for-pdfs"
+
+# Bedrock embedding model ID
+# Available options:
+# - amazon.titan-embed-text-v1 (default)
+# - amazon.titan-embed-text-v2:0
+# - cohere.embed-english-v3
+# - cohere.embed-multilingual-v3
+embedding_model_id = "amazon.titan-embed-text-v1"
+
+# Vector index name in OpenSearch Serverless
+vector_index_name = "bedrock-knowledge-base-index"
