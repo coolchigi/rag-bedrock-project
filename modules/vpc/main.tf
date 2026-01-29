@@ -2,6 +2,8 @@ data "aws_availability_zones" "available" {
   state = "available"
 }
 
+data "aws_region" "current" {}
+
 # 1a. VPC Definition
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
@@ -15,7 +17,7 @@ resource "aws_subnet" "public" {
   vpc_id                  = aws_vpc.main.id
   cidr_block              = "10.0.1.0/24"
   availability_zone       = data.aws_availability_zones.available.names[0]
-  map_public_ip_on_launch = true
+  map_public_ip_on_launch = false # Security: no auto-assign public IPs
   tags = { Name = "${var.project_name}-public-subnet" }
 }
 
@@ -75,26 +77,87 @@ resource "aws_route_table_association" "private" {
   route_table_id = aws_route_table.private.id
 }
 
-# 1f. Security Group (Crucial for allowing Lambda and OpenSearch to talk)
+# 1f. Security Group - tightened for HTTPS only (443 for Bedrock/OpenSearch APIs)
 resource "aws_security_group" "sg_lambda_opensearch" {
   name        = "${var.project_name}-sg"
   description = "Security group for Lambda and OpenSearch Serverless"
   vpc_id      = aws_vpc.main.id
 
-  # Ingress: Allow traffic from itself (Lambda <-> OpenSearch)
+  # Ingress: Allow HTTPS from within the VPC (Lambda <-> VPC Endpoints)
   ingress {
-    description = "Allow all internal traffic for OpenSearch/Lambda"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    self        = true
+    description = "HTTPS from VPC"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = [aws_vpc.main.cidr_block]
   }
 
-  # Egress: Allow all outbound traffic (for NAT/Internet access)
+  # Egress: Allow HTTPS only (Bedrock, OpenSearch, S3 are all HTTPS APIs)
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS outbound for AWS API calls"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  tags = { Name = "${var.project_name}-sg" }
+}
+
+# =============================================================================
+# VPC Endpoints - keep Lambda traffic on AWS backbone (avoids NAT for AWS APIs)
+# =============================================================================
+
+# OpenSearch Serverless VPC Endpoint
+resource "aws_opensearchserverless_vpc_endpoint" "aoss" {
+  name               = "${var.project_name}-aoss-vpce"
+  vpc_id             = aws_vpc.main.id
+  subnet_ids         = aws_subnet.private[*].id
+  security_group_ids = [aws_security_group.sg_lambda_opensearch.id]
+}
+
+# Bedrock Runtime VPC Endpoint (for InvokeModel, RetrieveAndGenerate)
+resource "aws_vpc_endpoint" "bedrock_runtime" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.bedrock-runtime"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.sg_lambda_opensearch.id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.project_name}-bedrock-runtime-vpce" }
+}
+
+# Bedrock Agent Runtime VPC Endpoint (for Retrieve, RetrieveAndGenerate via KB)
+resource "aws_vpc_endpoint" "bedrock_agent_runtime" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.bedrock-agent-runtime"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.sg_lambda_opensearch.id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.project_name}-bedrock-agent-runtime-vpce" }
+}
+
+# S3 Gateway Endpoint (free, keeps S3 traffic off NAT)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${data.aws_region.current.name}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_route_table.private.id]
+
+  tags = { Name = "${var.project_name}-s3-vpce" }
+}
+
+# CloudWatch Logs VPC Endpoint (for Lambda logging without NAT)
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = aws_subnet.private[*].id
+  security_group_ids  = [aws_security_group.sg_lambda_opensearch.id]
+  private_dns_enabled = true
+
+  tags = { Name = "${var.project_name}-logs-vpce" }
 }
