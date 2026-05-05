@@ -17,14 +17,26 @@ resource "aws_opensearchserverless_security_policy" "network" {
   type = "network"
   policy = jsonencode([
     {
+      Description = "Bedrock service access only - no public access"
       Rules = [
         {
           Resource = ["collection/${var.name_prefix}-collection"]
           ResourceType = "collection"
         }
       ]
-      AllowFromPublic = true
-      SourceServices = ["bedrock.amazonaws.com"]
+      AllowFromPublic = false
+      SourceServices  = ["bedrock.amazonaws.com"]
+    },
+    {
+      Description = "VPC endpoint access for Lambda functions"
+      Rules = [
+        {
+          Resource = ["collection/${var.name_prefix}-collection"]
+          ResourceType = "collection"
+        }
+      ]
+      AllowFromPublic    = false
+      SourceVPCEndpoints = var.vpc_endpoint_id != null ? [var.vpc_endpoint_id] : []
     }
   ])
 }
@@ -67,7 +79,7 @@ resource "aws_opensearchserverless_access_policy" "data_access" {
           ResourceType = "index"
         }
       ]
-      Principal = [var.kb_role_arn]
+      Principal = compact([var.kb_role_arn, var.lambda_role_arn])
     }
   ])
 }
