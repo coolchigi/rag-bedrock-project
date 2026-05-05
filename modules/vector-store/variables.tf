@@ -30,3 +30,15 @@ variable "metadata_field_name" {
   default     = "AMAZON_BEDROCK_METADATA"
   description = "Metadata field name in index"
 }
+
+variable "vpc_endpoint_id" {
+  type        = string
+  default     = null
+  description = "VPC endpoint ID for OpenSearch Serverless access (restricts network access to VPC)"
+}
+
+variable "lambda_role_arn" {
+  type        = string
+  default     = null
+  description = "Lambda execution role ARN for data access policy"
+}
