@@ -10,9 +10,70 @@ A reusable Terraform infrastructure for building Retrieval-Augmented Generation 
 - **IAM Roles**: Secure access between services
 - **VPC (Optional)**: Network isolation for Lambda functions
 
+## Prerequisites
+
+### AWS Authentication
+
+You need AWS credentials configured before running any Terraform commands. Pick one of the following:
+
+**Option A: AWS CLI (simplest)**
+
+```bash
+aws configure
+# Enter your Access Key ID, Secret Access Key, region, and output format
+```
+
+Terraform will automatically pick up credentials from `~/.aws/credentials`. All commands in this guide can be run as plain `terraform` commands.
+
+**Option B: aws-vault (recommended for security)**
+
+aws-vault encrypts your credentials in your OS keychain instead of storing them in plaintext.
+
+```bash
+brew install aws-vault
+aws-vault add YOUR_PROFILE
+```
+
+Prefix all Terraform commands with `aws-vault exec YOUR_PROFILE --no-session --`. The `--no-session` flag is required because some IAM operations reject the STS session tokens aws-vault generates by default.
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform apply
+```
+
+**Option C: IAM Identity Center (SSO)**
+
+Best option if you're on a team or want browser-based login with no long-lived keys.
+
+```ini
+# ~/.aws/config
+[profile YOUR_PROFILE]
+sso_start_url  = https://your-subdomain.awsapps.com/start
+sso_region     = us-east-1
+sso_account_id = YOUR_ACCOUNT_ID
+sso_role_name  = AdministratorAccess
+region         = us-east-1
+```
+
+```bash
+aws sso login --profile YOUR_PROFILE
+AWS_PROFILE=YOUR_PROFILE terraform apply
+```
+
+---
+
 ## Quick Start
 
 ### 1. Bootstrap (First Time Setup)
+
+The bootstrap creates the S3 state bucket, DynamoDB lock table, and a scoped deployer IAM policy. To create these resources, your IAM user needs `AdministratorAccess` for this step. If it doesn't have it, attach it first:
+
+```bash
+aws iam attach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+Then run the bootstrap:
 
 ```bash
 cd bootstrap
@@ -20,7 +81,35 @@ terraform init
 terraform apply -var="project_name=my-rag" -var="environment=dev"
 ```
 
-Copy the backend configuration from outputs and update `backend.tf`.
+When the apply completes, Terraform prints a `backend_config` output in your terminal. It looks like this:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket         = "my-rag-dev-terraform-state"
+    key            = "dev/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "my-rag-dev-terraform-lock"
+    encrypt        = true
+  }
+}
+```
+
+Copy that block, open `backend.tf` in the root directory, uncomment it, and replace the placeholder values with yours. Then run `terraform init` in the root directory to migrate state to S3.
+
+Now swap `AdministratorAccess` for the scoped deployer policy the bootstrap just created:
+
+```bash
+aws iam attach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/my-rag-dev-terraform-deployer
+
+aws iam detach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+From this point on, `AdministratorAccess` is no longer needed.
 
 ### 2. Deploy RAG Pipeline
 
@@ -30,7 +119,14 @@ cp terraform.tfvars.example terraform.tfvars
 
 # Edit terraform.tfvars with your values
 terraform init
-terraform plan
+
+# First deploy only - the OpenSearch provider needs the collection endpoint
+# to initialize. That endpoint doesn't exist on a fresh deploy, so Terraform
+# errors before creating anything. Create the collection first, then run the
+# full apply.
+terraform apply -target=module.vector_store
+
+# Deploy everything else
 terraform apply
 ```
 
