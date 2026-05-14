@@ -1,23 +1,23 @@
 output "state_bucket_name" {
-  description = "S3 bucket for Terraform state"
-  value       = aws_s3_bucket.terraform_state.id
+  description = "Name of the S3 bucket storing Terraform state"
+  value       = aws_s3_bucket.state.id
 }
 
-output "lock_table_name" {
-  description = "DynamoDB table for state locking"
-  value       = aws_dynamodb_table.terraform_lock.id
+output "deployer_policy_arn" {
+  description = "ARN of the scoped deployer IAM policy — attach this to your IAM user after bootstrap"
+  value       = aws_iam_policy.deployer.arn
 }
 
 output "backend_config" {
-  description = "Backend configuration to add to backend.tf"
-  value = <<-EOT
+  description = "Copy this block into backend.tf in the root directory, then run terraform init"
+  value       = <<-EOT
     terraform {
       backend "s3" {
-        bucket         = "${aws_s3_bucket.terraform_state.id}"
-        key            = "${var.environment}/terraform.tfstate"
-        region         = "${var.aws_region}"
-        dynamodb_table = "${aws_dynamodb_table.terraform_lock.id}"
-        encrypt        = true
+        bucket       = "${aws_s3_bucket.state.id}"
+        key          = "${var.environment}/terraform.tfstate"
+        region       = "${var.aws_region}"
+        use_lockfile = true
+        encrypt      = true
       }
     }
   EOT
