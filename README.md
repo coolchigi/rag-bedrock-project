@@ -1,290 +1,477 @@
-# AWS Bedrock RAG Pipeline with Terraform
+# RAG Infrastructure on AWS Bedrock
 
-A reusable Terraform infrastructure for building Retrieval-Augmented Generation (RAG) pipelines using AWS Bedrock Knowledge Bases, OpenSearch Serverless, and S3.
+Infrastructure for a Retrieval-Augmented Generation (RAG) application. Upload documents to S3, query them in plain English.
+
+## What gets deployed
+
+| Resource | Purpose |
+|---|---|
+| S3 bucket | Document storage - upload PDFs and text files here |
+| OpenSearch Serverless | Vector database - stores embedded document chunks |
+| Bedrock Knowledge Base | Orchestrates chunking, embedding, and indexing |
+| Bedrock Data Source | Connects S3 to the Knowledge Base |
+| Ingestion Lambda | Triggered on S3 upload - starts a Bedrock ingestion job automatically |
+| Query Lambda | Accepts a question, returns an answer grounded in your documents |
+| CloudWatch Log Groups | 14-day log retention for both Lambda functions |
+| SNS Topic | Operational alerts for Lambda errors |
 
 ## Architecture
 
-- **S3 Bucket**: Document storage for RAG data sources
-- **Amazon Bedrock Knowledge Base**: Manages document ingestion and retrieval
-- **OpenSearch Serverless**: Vector database for embeddings
-- **IAM Roles**: Secure access between services
-- **VPC (Optional)**: Network isolation for Lambda functions
+```
+User uploads PDF
+      │
+      ▼
+   S3 Bucket ──── S3 Event ────▶ Ingestion Lambda
+                                       │
+                                       ▼
+                               Bedrock Ingestion Job
+                                       │
+                              chunk → embed → index
+                                       │
+                                       ▼
+                              OpenSearch Serverless
+                              (vector store)
+
+User sends query
+      │
+      ▼
+ Query Lambda ──▶ Bedrock RetrieveAndGenerate ──▶ OpenSearch (retrieve chunks)
+                         │
+                         ▼
+                   Claude Sonnet 4.5 (generate answer)
+                         │
+                         ▼
+               Answer + source citations
+```
 
 ## Prerequisites
 
-### AWS Authentication
+### Tools
 
-You need AWS credentials configured before running any Terraform commands. Pick one of the following:
-
-**Option A: AWS CLI (simplest)**
+- [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.10
+- [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- [aws-vault](https://github.com/99designs/aws-vault)
 
 ```bash
-aws configure
-# Enter your Access Key ID, Secret Access Key, region, and output format
+brew install awscli terraform aws-vault
 ```
 
-Terraform will automatically pick up credentials from `~/.aws/credentials`. All commands in this guide can be run as plain `terraform` commands.
+### AWS account
 
-**Option B: aws-vault (recommended for security)**
+You need an IAM user with programmatic access (access key + secret key). During the bootstrap step, the user needs `AdministratorAccess`. After bootstrap, you swap to a scoped deployer policy - `AdministratorAccess` is not needed again.
 
-aws-vault encrypts your credentials in your OS keychain instead of storing them in plaintext.
+### Bedrock model access
+
+AWS now enables foundation models automatically on first invocation - no manual activation needed. Note: the Bedrock Model access page has been retired; model access is now granted automatically.
+
+### Configure aws-vault
+
+aws-vault stores your credentials in the macOS Keychain instead of a plaintext file.
 
 ```bash
-brew install aws-vault
+# Add your IAM user credentials
 aws-vault add YOUR_PROFILE
+
+# Verify - should print your account ID and user ARN
+aws-vault exec YOUR_PROFILE --no-session -- aws sts get-caller-identity
 ```
 
-Prefix all Terraform commands with `aws-vault exec YOUR_PROFILE --no-session --`. The `--no-session` flag is required because some IAM operations reject the STS session tokens aws-vault generates by default.
+> **Why `--no-session`?** By default, aws-vault calls `sts:GetSessionToken` to generate a short-lived session token. Certain IAM operations reject these tokens. `--no-session` injects your long-term credentials directly, which works for all operations. Use it on every command in this project.
+
+---
+
+## Deployment
+
+### Step 1 - Bootstrap (one time only)
+
+The bootstrap creates an S3 bucket for Terraform state (using S3 native locking - no DynamoDB needed) and a scoped deployer IAM policy that replaces `AdministratorAccess` after setup.
+
+Attach `AdministratorAccess` to your IAM user for this step. Because a user cannot grant itself permissions it doesn't already have, this must be done by root or an existing admin account - not by the user you're bootstrapping.
+
+**Option A - AWS Console (recommended):**
+1. Sign in as root or an IAM admin
+2. Go to IAM → Users → `YOUR_IAM_USER` → Permissions → Add permissions
+3. Choose "Attach policies directly", search for `AdministratorAccess`, and attach it
+
+**Option B - AWS CLI with a separate admin profile:**
+```bash
+aws-vault exec YOUR_ADMIN_PROFILE --no-session -- aws iam attach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+Replace `YOUR_ADMIN_PROFILE` with an aws-vault profile that already has IAM admin rights - this cannot be the same user you are bootstrapping.
+
+Run the bootstrap:
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- \
+  terraform -chdir=bootstrap init
+
+aws-vault exec YOUR_PROFILE --no-session -- \
+  terraform -chdir=bootstrap apply \
+  -var="project_name=my-rag" -var="environment=dev"
+```
+
+Type `yes` when prompted. When it finishes, two outputs matter:
+
+**`backend_config`** - copy this block into `backend.tf` in the root directory:
+
+```hcl
+terraform {
+  backend "s3" {
+    bucket       = "my-rag-dev-terraform-state-123456789012"
+    key          = "dev/terraform.tfstate"
+    region       = "us-east-1"
+    use_lockfile = true
+    encrypt      = true
+  }
+}
+```
+
+**`deployer_policy_arn`** - the ARN you'll use in the next step.
+
+Initialise the root module and migrate any existing local state to the S3 backend:
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform init -migrate-state
+```
+
+Type `yes` when prompted to copy existing state.
+
+Now swap to the scoped deployer policy:
+
+```bash
+# Attach the deployer policy the bootstrap just created
+aws-vault exec YOUR_PROFILE --no-session -- aws iam attach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn YOUR_DEPLOYER_POLICY_ARN
+
+# Remove AdministratorAccess
+aws-vault exec YOUR_PROFILE --no-session -- aws iam detach-user-policy \
+  --user-name YOUR_IAM_USER \
+  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+```
+
+Replace `YOUR_DEPLOYER_POLICY_ARN` with the `deployer_policy_arn` value from the bootstrap output.
+
+> **Updating the deployer policy later:** If you need to add permissions to the deployer policy after the initial bootstrap (for example, after hitting an `AccessDeniedException` during deploy), re-attach `AdministratorAccess` via the console, re-run `terraform -chdir=bootstrap apply` with the same variables, then swap back to the deployer policy and remove `AdministratorAccess` as above. The policy is updated in place - no other state is affected.
+
+---
+
+### Step 2 - Configure variables
+
+```bash
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars`:
+
+```hcl
+project_name         = "my-rag"    # must match what you used in bootstrap
+environment          = "dev"
+aws_region           = "us-east-1"
+embedding_dimensions = 512         # 256 or 512 - half the storage cost vs 1024
+```
+
+---
+
+### Step 3 - Deploy
+
+The OpenSearch collection must exist before the rest of the infrastructure can deploy, and the vector index must exist before Bedrock can create the Knowledge Base. This requires a sequenced three-part deploy - it is a one-time setup step and does not affect subsequent deploys.
+
+**3a - Create the OpenSearch collection:**
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform apply -target=module.opensearch
+```
+
+Type `yes` when prompted.
+
+**3b - Set the collection endpoint:**
+
+Once the collection is created, get its endpoint and add it to `terraform.tfvars`:
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform output collection_endpoint
+```
+
+Open `terraform.tfvars` and set:
+
+```hcl
+collection_endpoint = "https://YOUR_ENDPOINT.us-east-1.aoss.amazonaws.com"
+```
+
+**3c - Deploy everything else:**
+
+From the project root (not the `bootstrap/` directory):
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform init
+```
+
+Then deploy:
 
 ```bash
 aws-vault exec YOUR_PROFILE --no-session -- terraform apply
 ```
 
-**Option C: IAM Identity Center (SSO)**
+The `init` is needed once to download the OpenSearch provider. Type `yes` when prompted for the apply. This step takes a few minutes - Bedrock and OpenSearch resources take time to provision.
 
-Best option if you're on a team or want browser-based login with no long-lived keys.
-
-```ini
-# ~/.aws/config
-[profile YOUR_PROFILE]
-sso_start_url  = https://your-subdomain.awsapps.com/start
-sso_region     = us-east-1
-sso_account_id = YOUR_ACCOUNT_ID
-sso_role_name  = AdministratorAccess
-region         = us-east-1
-```
+When it finishes, note the Terraform outputs - you will need them in the next steps:
 
 ```bash
-aws sso login --profile YOUR_PROFILE
-AWS_PROFILE=YOUR_PROFILE terraform apply
+aws-vault exec YOUR_PROFILE --no-session -- terraform output
 ```
 
 ---
 
-## Quick Start
+### Step 4 - Upload documents
 
-### 1. Bootstrap (First Time Setup)
-
-The bootstrap creates the S3 state bucket, DynamoDB lock table, and a scoped deployer IAM policy. To create these resources, your IAM user needs `AdministratorAccess` for this step. If it doesn't have it, attach it first:
+Copy your PDFs or text files to S3. Replace `/path/to/your/documents` with the local folder containing your files - this can be anywhere on your machine, it does not need to be inside the project directory:
 
 ```bash
-aws iam attach-user-policy \
-  --user-name YOUR_IAM_USER \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
+BUCKET=$(aws-vault exec YOUR_PROFILE --no-session -- terraform output -raw document_bucket_name)
+aws-vault exec YOUR_PROFILE --no-session -- aws s3 cp /path/to/your/documents/ s3://$BUCKET/ --recursive
 ```
 
-Then run the bootstrap:
+Uploading a file automatically triggers the ingestion Lambda, which starts a Bedrock ingestion job. Ingestion takes 1–5 minutes depending on file count and size.
+
+Check ingestion status:
 
 ```bash
-cd bootstrap
-terraform init
-terraform apply -var="project_name=my-rag" -var="environment=dev"
+KB_ID=$(aws-vault exec YOUR_PROFILE --no-session -- terraform output -raw knowledge_base_id)
+DS_ID=$(aws-vault exec YOUR_PROFILE --no-session -- terraform output -raw data_source_id)
+aws-vault exec YOUR_PROFILE --no-session -- aws bedrock-agent list-ingestion-jobs \
+  --knowledge-base-id $KB_ID \
+  --data-source-id $DS_ID \
+  --region us-east-1
 ```
 
-When the apply completes, Terraform prints a `backend_config` output in your terminal. It looks like this:
+Wait for status `COMPLETE` before querying.
 
-```hcl
-terraform {
-  backend "s3" {
-    bucket         = "my-rag-dev-terraform-state"
-    key            = "dev/terraform.tfstate"
-    region         = "us-east-1"
-    dynamodb_table = "my-rag-dev-terraform-lock"
-    encrypt        = true
-  }
-}
-```
+Output should look something like
 
-Copy that block, open `backend.tf` in the root directory, uncomment it, and replace the placeholder values with yours. Then run `terraform init` in the root directory to migrate state to S3.
+```json
 
-Now swap `AdministratorAccess` for the scoped deployer policy the bootstrap just created:
-
-```bash
-aws iam attach-user-policy \
-  --user-name YOUR_IAM_USER \
-  --policy-arn arn:aws:iam::YOUR_ACCOUNT_ID:policy/my-rag-dev-terraform-deployer
-
-aws iam detach-user-policy \
-  --user-name YOUR_IAM_USER \
-  --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
-```
-
-From this point on, `AdministratorAccess` is no longer needed.
-
-### 2. Deploy RAG Pipeline
-
-```bash
-# Copy example variables
-cp terraform.tfvars.example terraform.tfvars
-
-# Edit terraform.tfvars with your values
-terraform init
-
-# First deploy only - the OpenSearch provider needs the collection endpoint
-# to initialize. That endpoint doesn't exist on a fresh deploy, so Terraform
-# errors before creating anything. Create the collection first, then run the
-# full apply.
-terraform apply -target=module.vector_store
-
-# Deploy everything else
-terraform apply
-```
-
-### 3. Upload Documents and Test
-
-```bash
-# Upload documents
-aws s3 cp ./documents/ s3://YOUR_BUCKET_NAME/ --recursive
-
-# Start ingestion
-aws bedrock-agent start-ingestion-job \
-  --knowledge-base-id YOUR_KB_ID \
-  --data-source-id YOUR_DS_ID
-
-# Test retrieval
-aws bedrock-agent-runtime retrieve \
-  --knowledge-base-id YOUR_KB_ID \
-  --retrieval-query text="Your question here"
-```
-
-## Configuration
-
-### Required Variables
-
-```hcl
-data_source_bucket_name = "my-documents-bucket"  # S3 bucket for documents
-```
-
-### Optional Variables
-
-```hcl
-aws_region              = "us-east-1"
-project_name            = "bedrock-kb"
-environment             = "prod"
-embedding_model_id      = "amazon.titan-embed-text-v2:0"
-titan_v2_dimensions     = 1024
-chunking_strategy       = "FIXED_SIZE"
-chunk_max_tokens        = 300
-chunk_overlap_percentage = 20
-```
-
-## Supported Embedding Models
-
-- `amazon.titan-embed-text-v2:0` (256, 512, or 1024 dimensions)
-- `amazon.titan-embed-text-v1` (1536 dimensions)
-- `cohere.embed-english-v3` (1024 dimensions)
-- `cohere.embed-multilingual-v3` (1024 dimensions)
-
-## Chunking Strategies
-
-- **FIXED_SIZE**: Fixed token chunks with overlap
-- **HIERARCHICAL**: Multi-level chunking for better context
-- **SEMANTIC**: AI-powered semantic chunking
-- **NONE**: No chunking (use original documents)
-
-## Module Structure
-
-```
-modules/
-├── bootstrap/          # State management setup
-├── data-source/        # S3 bucket and Bedrock data source
-├── knowledge-base/     # Bedrock Knowledge Base and IAM
-├── vector-store/       # OpenSearch Serverless collection
-├── iam/               # Lambda execution roles
-└── vpc/               # Optional VPC for Lambda isolation
-```
-
-## Outputs
-
-- `knowledge_base_id`: For API integration
-- `s3_bucket_name`: For document uploads
-- `kb_role_arn`: For Lambda functions
-- `collection_endpoint`: OpenSearch endpoint
-- `deployment_commands`: Next steps
-
-## Cost Optimization
-
-- OpenSearch Serverless: Pay per use
-- Bedrock: Pay per API call and token
-- S3: Standard storage pricing
-- No always-on compute costs
-
-## Security Features
-
-- S3 bucket encryption and public access blocking
-- IAM roles with least privilege access
-- VPC isolation for Lambda functions
-- OpenSearch Serverless network policies
-
-## Customization
-
-### Adding Lambda Functions
-
-```hcl
-module "iam" {
-  source = "./modules/iam"
-  name_prefix = local.name_prefix
-}
-
-resource "aws_lambda_function" "rag_query" {
-  filename         = "rag_function.zip"
-  function_name    = "${local.name_prefix}-rag-query"
-  role            = module.iam.lambda_execution_role_arn
-  handler         = "index.handler"
-  runtime         = "python3.11"
-  
-  environment {
-    variables = {
-      KNOWLEDGE_BASE_ID = module.knowledge_base.knowledge_base_id
+{
+  "ingestionJobSummaries": [
+    {
+      "ingestionJobId": "12345678-90ab-cdef-1234-567890abcdef",
+      "knowledgeBaseId": "kb-abcdefghij1234567890",
+      "dataSourceId": "ds-abcdefghij1234567890",
+      "statistics": {}
+      "status": "COMPLETE",
+      "createdAt": "2024-01-01T12:00:00Z",
+      "updatedAt": "2024-01-01T12:05:00Z"
     }
-  }
+  ]
 }
 ```
 
-### Multi-Environment Setup
+---
 
-```hcl
-# dev.tfvars
-environment = "dev"
-project_name = "my-rag"
-data_source_bucket_name = "my-rag-dev-documents"
+### Step 5 - Query your documents
 
-# prod.tfvars  
-environment = "prod"
-project_name = "my-rag"
-data_source_bucket_name = "my-rag-prod-documents"
+```bash
+FN=$(aws-vault exec YOUR_PROFILE --no-session -- terraform output -raw query_function_name)
+aws-vault exec YOUR_PROFILE --no-session -- aws lambda invoke \
+  --function-name $FN \
+  --payload '{"body":"{\"query\":\"What are the main topics covered in these documents?\"}","requestContext":{"requestId":"test-1"},"headers":{}}' \
+  --cli-binary-format raw-in-base64-out \
+  /tmp/response.json && cat /tmp/response.json
 ```
+
+The response includes the answer and citations pointing to the source document chunks:
+
+```json
+{
+  "statusCode": 200,
+  "headers": { "Content-Type": "application/json" },
+  "body": "{\"answer\":\"The documents cover...\",\"citations\":[{\"text\":\"...\",\"sources\":[{\"uri\":\"s3://my-rag-dev-documents/report.pdf\"}]}]}"
+}
+```
+
+> **Note:** The `body` field is a JSON string. Parse it if you want to work with the answer and citations programmatically.
+
+---
+
+## Teardown
+
+Destroy all deployed infrastructure:
+
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform destroy
+```
+
+If the destroy fails with:
+
+```
+Error: waiting for Bedrock Agent Data Source delete
+unexpected state 'DELETE_UNSUCCESSFUL' ... Unable to delete data from vector store
+```
+
+Bedrock is trying to clean up vector data from OpenSearch while OpenSearch itself is being torn down at the same time. Since the whole collection is being destroyed anyway, the cleanup is moot. Set `data_deletion_policy = "RETAIN"` on the data source in `modules/bedrock/main.tf`, then re-run `terraform destroy`.
+
+Then destroy the bootstrap resources. The state bucket is versioned, so you must empty it before it can be deleted:
+
+```bash
+# Remove all object versions from the state bucket
+aws-vault exec YOUR_PROFILE --no-session -- \
+  aws s3api delete-objects \
+  --bucket YOUR_STATE_BUCKET_NAME \
+  --delete "$(aws-vault exec YOUR_PROFILE --no-session -- \
+    aws s3api list-object-versions \
+    --bucket YOUR_STATE_BUCKET_NAME \
+    --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+    --output json)"
+
+# Destroy bootstrap
+aws-vault exec YOUR_PROFILE --no-session -- \
+  terraform -chdir=bootstrap destroy
+```
+
+Replace `YOUR_STATE_BUCKET_NAME` with your state bucket name (from the `state_bucket_name` bootstrap output).
+
+---
+
+## Module structure
+
+```
+bootstrap/          one-time state setup (S3 bucket with native locking, deployer policy)
+modules/
+  storage/          S3 document bucket
+  opensearch/       OpenSearch Serverless security policies and collection
+  bedrock/          Bedrock Knowledge Base, data source, and KB IAM role
+  lambda/           ingestion and query Lambda functions, execution roles, and log groups
+lambda/
+  src/
+    ingest.mjs      S3-triggered handler - starts Bedrock ingestion jobs
+    query.mjs       query handler - calls RetrieveAndGenerate, returns answer + citations
+  package.json
+main.tf             root orchestration - providers, SNS topic, module wiring
+variables.tf
+outputs.tf
+backend.tf          terraform block, S3 backend config, and AWS provider
+terraform.tfvars.example
+```
+
+---
 
 ## Troubleshooting
 
-### Common Issues
+### Credentials & connectivity
 
-1. **IAM Propagation**: Wait 20-30 seconds after role creation
-2. **OpenSearch Index**: Ensure proper field mappings
-3. **Bedrock Model Access**: Enable model access in Bedrock console
-4. **S3 Permissions**: Verify bucket policies for Bedrock access
+**`InvalidClientTokenId` on any command**
+You ran the command without `--no-session`. Every command in this project requires it: `aws-vault exec YOUR_PROFILE --no-session -- ...`
 
-### Validation Commands
+**`No such host` on any AWS endpoint**
+Your machine cannot reach AWS. Check your internet connection and VPN.
 
+---
+
+### Bootstrap & IAM
+
+**`iam:AttachUserPolicy` - not authorized**
+An IAM user cannot grant itself permissions it does not already have. The initial `AdministratorAccess` attachment must be done by root or a separate admin account via the AWS Console or a different aws-vault profile. See Step 1.
+
+**`AccessDeniedException` during `terraform apply`**
+The deployer policy is missing a permission. To fix: update `bootstrap/main.tf` to add the missing action, re-attach `AdministratorAccess` via the console, re-run `terraform -chdir=bootstrap apply` with the same variables, then swap back to the deployer policy and remove `AdministratorAccess`. See the note at the end of Step 1.
+
+Common permissions that have come up missing during deployment:
+- `aoss:TagResource`, `aoss:BatchGetCollection` - OpenSearch collection create/wait
+- `sns:ListTagsForResource` - SNS topic tagging
+- `logs:ListTagsForResource` - CloudWatch log group tagging
+- `s3:CreateBucket` denied despite being in the policy - check that the S3 resource ARN in the policy covers `${environment}-${project_name}-*`, not just `${project_name}-*`
+
+---
+
+### Terraform state
+
+**`Backend configuration changed` on `terraform init`**
+Terraform detected the backend changed from local to S3. Use the migrate flag:
 ```bash
-# Check Knowledge Base status
-aws bedrock-agent get-knowledge-base --knowledge-base-id YOUR_KB_ID
-
-# List ingestion jobs
-aws bedrock-agent list-ingestion-jobs --knowledge-base-id YOUR_KB_ID
-
-# Test OpenSearch connection
-curl -X GET "YOUR_COLLECTION_ENDPOINT/_cluster/health"
+aws-vault exec YOUR_PROFILE --no-session -- terraform init -migrate-state
 ```
 
-## Contributing
+**`ConflictException: A collection with name '...' already exists`**
+A previous apply failed partway through - the collection was created in AWS but never saved to Terraform state. Import it instead of recreating:
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform import \
+  module.opensearch.aws_opensearchserverless_collection.vectors \
+  YOUR_COLLECTION_ID
+```
+Find `YOUR_COLLECTION_ID` in the AWS Console under OpenSearch Serverless → Collections, or as the last segment after `collection/` in the ARN from the error output. Then re-run `terraform apply -target=module.opensearch`.
 
-1. Fork the repository
-2. Create feature branch
-3. Add/modify modules as needed
-4. Test with multiple environments
-5. Submit pull request
+**`Output "collection_endpoint" not found`**
+The output exists in `outputs.tf` but is not yet in state because it was added after the initial apply. Refresh state without making changes:
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- terraform apply -target=module.opensearch -refresh-only
+```
 
-## License
+---
 
-MIT License - see LICENSE file for details
+### OpenSearch
+
+**Index creation returns 403**
+The AOSS data access policy has not fully propagated yet - AWS takes up to 60 seconds. Wait a minute and retry.
+
+**`HEAD healthcheck failed: This is usually due to network or permission issues`**
+OpenSearch Serverless does not respond to the health ping the standard OpenSearch provider sends on startup. Set `healthcheck = false` in the `provider "opensearch"` block in `backend.tf`.
+
+**`ValidationException: no such index [bedrock-knowledge-base-default-index]`**
+Usually a downstream effect of the healthcheck failure above - the index was never created so Bedrock has nothing to connect to. Fix the healthcheck error first, then re-run `terraform apply`.
+
+**Index is destroyed and recreated on every `terraform apply`**
+If Terraform shows a destroy/replace for `opensearch_index.bedrock_kb` on every run, the culprit is a type mismatch in the `AMAZON_BEDROCK_METADATA` mapping. The `index` field must be a boolean `false`, not the string `"false"`. In `main.tf`:
+
+```hcl
+"AMAZON_BEDROCK_METADATA" = {
+  type  = "text"
+  index = false   # boolean, not "false"
+}
+```
+
+This matters because every time Terraform recreates the index, any previously ingested data is wiped and you have to re-ingest.
+
+---
+
+### Ingestion & querying
+
+**`InvalidParameterValueException: Specified ReservedConcurrentExecutions decreases account's UnreservedConcurrentExecution below its minimum value of 50`**
+New AWS accounts have a low default concurrency limit. Reserved concurrency on the Lambda functions pushes the unreserved pool below AWS's minimum of 50. This is a dev environment — reserved concurrency is not needed. Remove the `reserved_concurrent_executions` attribute from both Lambda functions in `modules/lambda/main.tf`.
+
+**Query returns 503 - "Service temporarily unavailable"**
+The Lambda is catching a Bedrock error and returning 503. Check CloudWatch Logs for the actual error:
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- aws logs tail \
+  /aws/lambda/${environment}-${project_name}-query \
+  --since 10m \
+  --region us-east-1
+```
+If the logs show `AccessDeniedException`, check which action is missing. `RetrieveAndGenerate` requires three separate IAM permissions: `bedrock:RetrieveAndGenerate` on the Knowledge Base ARN, `bedrock:Retrieve` on the Knowledge Base ARN, and `bedrock:InvokeModel` on the model ARN. All three are included in `modules/lambda/main.tf` — if you hit this error on a fresh deploy it usually means an earlier version of the file was applied without all three. Run `terraform apply` to reconcile.
+
+**Ingestion job status is `FAILED`**
+Check CloudWatch Logs at `/aws/lambda/${environment}-${project_name}-ingest`. Most common cause: unsupported file format. Bedrock supports PDF, plain text, HTML, Word (.docx), and CSV.
+
+**Query returns 400 - "query is required"**
+The Lambda expects the query inside a `body` field. Make sure your payload matches the format shown in Step 5.
+
+**Ingestion shows COMPLETE but queries return empty results**
+The ingestion job reports `numberOfNewDocumentsIndexed: 2` (or similar) but `bedrock-agent-runtime retrieve` returns `{"retrievalResults": []}`. The most common cause is a timing issue: the ingestion job ran against an old or empty index, and the index was subsequently destroyed and recreated by Terraform. The newly created index is empty even though the job showed success.
+
+To fix:
+1. Make sure the index is stable (not being destroyed/recreated on each apply — see the mapping type issue above)
+2. Trigger a fresh ingestion job after the index is confirmed stable:
+```bash
+aws-vault exec YOUR_PROFILE --no-session -- aws bedrock-agent start-ingestion-job \
+  --knowledge-base-id $KB_ID \
+  --data-source-id $DS_ID \
+  --region us-east-1
+```
+3. Wait for the new job to reach `COMPLETE`, then retry retrieval
+
+**`terraform destroy` fails with `DELETE_UNSUCCESSFUL` on the data source**
+See the note in the Teardown section above — set `data_deletion_policy = "RETAIN"` in `modules/bedrock/main.tf` and re-run.
+
+Note: Bedrock does not provide a way to delete ingestion job history. The list will always show all historical jobs — look at the most recent one (`createdAt`) to check current status.
