@@ -1,4 +1,7 @@
-variable "bucket_name" {
-  type        = string
-  description = "S3 bucket name for document uploads. Must be globally unique."
+variable "config" {
+  description = "Global configuration object from root"
+  type = object({
+    project_name = string
+    environment  = string
+  })
 }
