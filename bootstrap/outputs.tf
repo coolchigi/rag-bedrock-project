@@ -1,10 +1,20 @@
 output "state_bucket_name" {
-  description = "Name of the S3 bucket storing Terraform state"
-  value       = aws_s3_bucket.state.id
+  description = "S3 bucket name for Terraform remote state"
+  value       = aws_s3_bucket.terraform_state.id
+}
+
+output "state_bucket_arn" {
+  description = "S3 bucket ARN for Terraform remote state"
+  value       = aws_s3_bucket.terraform_state.arn
+}
+
+output "aws_region" {
+  description = "AWS region where the state bucket was created"
+  value       = var.aws_region
 }
 
 output "deployer_policy_arn" {
-  description = "ARN of the scoped deployer IAM policy — attach this to your IAM user after bootstrap"
+  description = "ARN of the scoped deployer IAM policy — attach to your IAM user and remove AdministratorAccess"
   value       = aws_iam_policy.deployer.arn
 }
 
@@ -13,7 +23,7 @@ output "backend_config" {
   value       = <<-EOT
     terraform {
       backend "s3" {
-        bucket       = "${aws_s3_bucket.state.id}"
+        bucket       = "${aws_s3_bucket.terraform_state.id}"
         key          = "${var.environment}/terraform.tfstate"
         region       = "${var.aws_region}"
         use_lockfile = true
