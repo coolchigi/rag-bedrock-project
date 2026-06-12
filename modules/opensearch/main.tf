@@ -1,63 +1,84 @@
 locals {
-  collection_name = "${var.name_prefix}-collection"
+  collection_name = "${var.config.environment}-${var.config.project_name}-vectors"
 }
 
-# =============================================================================
-# Encryption policy — must exist before the collection is created.
-# AWSOwnedKey = true uses an AWS-managed key (no extra cost or OCU requirement).
-# =============================================================================
-
 resource "aws_opensearchserverless_security_policy" "encryption" {
-  name = "${var.name_prefix}-encryption"
+  name = "${var.config.environment}-${var.config.project_name}-enc"
   type = "encryption"
 
   policy = jsonencode({
-    Rules = [{
-      Resource     = ["collection/${local.collection_name}"]
-      ResourceType = "collection"
-    }]
+    Rules = [
+      {
+        ResourceType = "collection"
+        Resource     = ["collection/${local.collection_name}"]
+      }
+    ]
     AWSOwnedKey = true
   })
 }
 
-# =============================================================================
-# Network policy — controls who can reach the collection endpoint.
-#
-# AllowFromPublic = true is intentional here: the Terraform deployer (an IAM
-# user) needs to reach the endpoint to create the OpenSearch index. Without a
-# VPC endpoint, the only way to allow this is via the public endpoint.
-#
-# This does NOT mean the data is unprotected — access still requires both:
-#   1. IAM permission (aoss:APIAccessAll) on the deployer policy, AND
-#   2. An OSS data access policy listing the principal explicitly.
-#
-# For production with stricter network requirements, add a VPC endpoint and
-# set AllowFromPublic = false with a SourceVPCEndpoints rule.
-# =============================================================================
-
 resource "aws_opensearchserverless_security_policy" "network" {
-  name = "${var.name_prefix}-network"
+  name = "${var.config.environment}-${var.config.project_name}-net"
   type = "network"
 
-  policy = jsonencode([{
-    Rules = [{
-      Resource     = ["collection/${local.collection_name}"]
-      ResourceType = "collection"
-    }]
-    AllowFromPublic = true
-  }])
+  policy = jsonencode([
+    {
+      Rules = [
+        {
+          ResourceType = "collection"
+          Resource     = ["collection/${local.collection_name}"]
+        },
+        {
+          ResourceType = "dashboard"
+          Resource     = ["collection/${local.collection_name}"]
+        }
+      ]
+      AllowFromPublic = true
+    }
+  ])
 }
 
-# =============================================================================
-# Collection — depends on both security policies being in place first.
-# =============================================================================
+resource "aws_opensearchserverless_access_policy" "bedrock" {
+  name = "${var.config.environment}-${var.config.project_name}-access"
+  type = "data"
 
-resource "aws_opensearchserverless_collection" "main" {
+  policy = jsonencode([
+    {
+      Rules = [
+        {
+          ResourceType = "index"
+          Resource     = ["index/${local.collection_name}/*"]
+          Permission = [
+            "aoss:CreateIndex",
+            "aoss:DeleteIndex",
+            "aoss:UpdateIndex",
+            "aoss:DescribeIndex",
+            "aoss:ReadDocument",
+            "aoss:WriteDocument"
+          ]
+        },
+        {
+          ResourceType = "collection"
+          Resource     = ["collection/${local.collection_name}"]
+          Permission = [
+            "aoss:CreateCollectionItems",
+            "aoss:DescribeCollectionItems",
+            "aoss:UpdateCollectionItems"
+          ]
+        }
+      ]
+      Principal = [var.bedrock_kb_role_arn, var.deployer_arn]
+    }
+  ])
+}
+
+resource "aws_opensearchserverless_collection" "vectors" {
   name = local.collection_name
   type = "VECTORSEARCH"
 
   depends_on = [
     aws_opensearchserverless_security_policy.encryption,
     aws_opensearchserverless_security_policy.network,
+    aws_opensearchserverless_access_policy.bedrock
   ]
 }
