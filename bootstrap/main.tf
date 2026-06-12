@@ -74,16 +74,7 @@ resource "aws_iam_policy" "deployer" {
       {
         Sid    = "S3State"
         Effect = "Allow"
-        Action = [
-          "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
-          "s3:ListBucket", "s3:GetBucketVersioning",
-          "s3:GetBucketPolicy", "s3:PutBucketPolicy",
-          "s3:GetEncryptionConfiguration", "s3:PutEncryptionConfiguration",
-          "s3:GetPublicAccessBlock", "s3:PutPublicAccessBlock",
-          "s3:PutBucketVersioning", "s3:GetBucketNotification",
-          "s3:PutBucketNotification", "s3:CreateBucket", "s3:DeleteBucket",
-          "s3:DeleteObjectVersion", "s3:ListBucketVersions"
-        ]
+        Action = ["s3:*"]
         Resource = [
           "arn:aws:s3:::${var.project_name}-*",
           "arn:aws:s3:::${var.project_name}-*/*",
