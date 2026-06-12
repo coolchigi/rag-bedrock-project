@@ -1,54 +1,44 @@
-variable "name_prefix" {
-  type = string
+variable "config" {
+  description = "Global configuration object from root"
+  type = object({
+    project_name                = string
+    environment                 = string
+    aws_region                  = string
+    embedding_dimensions        = number
+  })
 }
 
-variable "ingestion_lambda_role_arn" {
-  type = string
-}
-
-variable "ingestion_lambda_role_name" {
+variable "kb_id" {
+  description = "Bedrock Knowledge Base ID"
   type        = string
-  description = "Role name used to attach the ingestion Lambda's inline IAM policy"
 }
 
-variable "query_lambda_role_arn" {
-  type = string
-}
-
-variable "query_lambda_role_name" {
+variable "kb_arn" {
+  description = "Bedrock Knowledge Base ARN for IAM policy"
   type        = string
-  description = "Role name used to attach the query Lambda's inline IAM policy"
-}
-
-variable "knowledge_base_id" {
-  type = string
-}
-
-variable "knowledge_base_arn" {
-  type        = string
-  description = "Knowledge Base ARN — used to scope the query Lambda's IAM policy"
 }
 
 variable "data_source_id" {
-  type = string
-}
-
-variable "data_source_bucket_name" {
+  description = "Bedrock data source ID for ingestion jobs"
   type        = string
-  description = "Document bucket name — used to scope the S3 invoke permission"
 }
 
-variable "inference_model_id" {
-  type    = string
-  default = "anthropic.claude-3-haiku-20240307-v1:0"
+variable "bucket_id" {
+  description = "S3 document bucket name for event notifications"
+  type        = string
 }
 
-variable "lambda_timeout" {
-  type    = number
-  default = 60
+variable "bucket_arn" {
+  description = "S3 document bucket ARN for IAM policy"
+  type        = string
 }
 
-variable "lambda_memory" {
-  type    = number
-  default = 256
+variable "lambda_source_dir" {
+  description = "Path to the Lambda source directory"
+  type        = string
+}
+
+variable "sns_topic_arn" {
+  description = "SNS topic ARN for error alerts"
+  type        = string
 }
