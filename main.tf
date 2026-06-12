@@ -1,70 +1,89 @@
-provider "aws" {
-  region = var.aws_region
-
-  default_tags {
-    tags = {
-      Project     = var.project_name
-      Environment = var.environment
-      ManagedBy   = "Terraform"
-    }
-  }
-}
-
-provider "opensearch" {
-  url         = module.vector_store.collection_endpoint
-  aws_region  = var.aws_region
-  healthcheck = false
-}
+data "aws_caller_identity" "current" {}
 
 locals {
-  name_prefix = "${var.project_name}-${var.environment}"
-  
-  embedding_model_dimensions = {
-    "amazon.titan-embed-text-v2:0"     = var.titan_v2_dimensions
-    "amazon.titan-embed-text-v1"       = 1536
-    "cohere.embed-english-v3"          = 1024
-    "cohere.embed-multilingual-v3"     = 1024
+  config = {
+    project_name                = var.project_name
+    environment                 = var.environment
+    aws_region                  = var.aws_region
+    embedding_dimensions        = var.embedding_dimensions
   }
-  
-  vector_dimensions = lookup(local.embedding_model_dimensions, var.embedding_model_id, 1024)
 }
 
-module "vector_store" {
-  source = "./modules/vector-store"
-
-  name_prefix        = local.name_prefix
-  vector_dimensions  = local.vector_dimensions
-  kb_role_arn        = module.knowledge_base.kb_role_arn
+resource "aws_sns_topic" "alerts" {
+  name = "${var.environment}-${var.project_name}-alerts"
 }
 
-module "knowledge_base" {
-  source = "./modules/knowledge-base"
-
-  name_prefix         = local.name_prefix
-  embedding_model_id  = var.embedding_model_id
-  collection_arn      = module.vector_store.collection_arn
-  vector_index_name   = module.vector_store.vector_index_name
-  vector_field_name   = module.vector_store.vector_field_name
-  text_field_name     = module.vector_store.text_field_name
-  metadata_field_name = module.vector_store.metadata_field_name
-  data_source_bucket_arn = module.data_source.bucket_arn
+module "storage" {
+  source = "./modules/storage"
+  config = local.config
 }
 
-module "data_source" {
-  source = "./modules/data-source"
+module "bedrock" {
+  source = "./modules/bedrock"
+  config = local.config
 
-  name_prefix             = local.name_prefix
-  knowledge_base_id       = module.knowledge_base.knowledge_base_id
-  data_source_bucket_name = var.data_source_bucket_name
-  chunking_strategy       = var.chunking_strategy
-  chunk_max_tokens        = var.chunk_max_tokens
-  chunk_overlap_percentage = var.chunk_overlap_percentage
+  bucket_arn          = module.storage.bucket_arn
+  collection_arn      = module.opensearch.collection_arn
+  collection_endpoint = module.opensearch.collection_endpoint
 }
 
-resource "time_sleep" "iam_propagation" {
-  create_duration = "20s"
-  depends_on = [
-    module.knowledge_base,
-    module.vector_store
-  ]
+module "opensearch" {
+  source = "./modules/opensearch"
+  config = local.config
+
+  bedrock_kb_role_arn = module.bedrock.kb_role_arn
+  deployer_arn        = data.aws_caller_identity.current.arn
+}
+
+resource "opensearch_index" "bedrock_kb" {
+  name          = "bedrock-knowledge-base-default-index"
+  index_knn     = true
+  force_destroy = true
+
+  mappings = jsonencode({
+    properties = {
+      "bedrock-knowledge-base-default-vector" = {
+        type      = "knn_vector"
+        dimension = var.embedding_dimensions
+        method = {
+          name       = "hnsw"
+          engine     = "faiss"
+          space_type = "l2"
+          parameters = {
+            ef_construction = 512
+            m               = 16
+          }
+        }
+      }
+      "AMAZON_BEDROCK_TEXT_CHUNK" = {
+        type = "text"
+      }
+      "AMAZON_BEDROCK_METADATA" = {
+        type  = "text"
+        index = false
+      }
+    }
+  })
+
+  lifecycle {
+    precondition {
+      condition     = var.opensearch_collection_endpoint != "https://placeholder.us-east-1.aoss.amazonaws.com"
+      error_message = "Set opensearch_collection_endpoint in terraform.tfvars to the value from 'terraform output collection_endpoint' before running the full apply."
+    }
+  }
+
+  depends_on = [module.opensearch]
+}
+
+module "lambda" {
+  source = "./modules/lambda"
+  config = local.config
+
+  kb_id             = module.bedrock.kb_id
+  kb_arn            = module.bedrock.kb_arn
+  data_source_id    = module.bedrock.data_source_id
+  bucket_id         = module.storage.bucket_id
+  bucket_arn        = module.storage.bucket_arn
+  lambda_source_dir = "${path.root}/lambda/src"
+  sns_topic_arn     = aws_sns_topic.alerts.arn
 }
