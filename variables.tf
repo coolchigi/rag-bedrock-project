@@ -1,72 +1,30 @@
-variable "aws_region" {
-  type        = string
-  default     = "us-east-1"
-  description = "AWS region for resources"
-}
-
 variable "project_name" {
+  description = "Project name used for resource naming"
   type        = string
-  default     = "bedrock-kb"
-  description = "Project name for resource naming"
 }
 
 variable "environment" {
+  description = "Environment name (dev, staging, prod)"
   type        = string
-  default     = "prod"
-  description = "Environment (dev, staging, prod)"
 }
 
-variable "embedding_model_id" {
+variable "aws_region" {
+  description = "AWS region for all resources"
   type        = string
-  default     = "amazon.titan-embed-text-v2:0"
-  description = "Bedrock embedding model ID"
+}
+
+variable "opensearch_collection_endpoint" {
+  description = "OpenSearch Serverless collection endpoint URL. Run 'terraform output collection_endpoint' after step 3a and add the value to terraform.tfvars before running the full apply."
+  type        = string
+  default     = "https://placeholder.us-east-1.aoss.amazonaws.com"
+}
+
+variable "embedding_dimensions" {
+  description = "Titan Text Embeddings v2 vector dimensions (256 or 512)"
+  type        = number
 
   validation {
-    condition = contains([
-      "amazon.titan-embed-text-v2:0",
-      "amazon.titan-embed-text-v1",
-      "cohere.embed-english-v3",
-      "cohere.embed-multilingual-v3"
-    ], var.embedding_model_id)
-    error_message = "Invalid embedding model. Choose from: titan-v2, titan-v1, cohere-english, cohere-multilingual"
+    condition     = contains([256, 512], var.embedding_dimensions)
+    error_message = "Embedding dimensions must be 256 or 512."
   }
-}
-
-variable "titan_v2_dimensions" {
-  type        = number
-  default     = 1024
-  description = "Vector dimensions for Titan V2 (256, 512, or 1024)"
-
-  validation {
-    condition     = contains([256, 512, 1024], var.titan_v2_dimensions)
-    error_message = "Titan V2 dimensions must be 256, 512, or 1024"
-  }
-}
-
-variable "data_source_bucket_name" {
-  type        = string
-  description = "S3 bucket name for PDF documents (created if doesn't exist)"
-}
-
-variable "chunking_strategy" {
-  type        = string
-  default     = "FIXED_SIZE"
-  description = "Chunking strategy: FIXED_SIZE, HIERARCHICAL, SEMANTIC, NONE"
-
-  validation {
-    condition     = contains(["FIXED_SIZE", "HIERARCHICAL", "SEMANTIC", "NONE"], var.chunking_strategy)
-    error_message = "Invalid chunking strategy"
-  }
-}
-
-variable "chunk_max_tokens" {
-  type        = number
-  default     = 300
-  description = "Maximum tokens per chunk"
-}
-
-variable "chunk_overlap_percentage" {
-  type        = number
-  default     = 20
-  description = "Percentage overlap between chunks"
 }
