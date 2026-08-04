@@ -6,7 +6,7 @@ import {
 const client = new BedrockAgentRuntimeClient();
 const KNOWLEDGE_BASE_ID = process.env.KNOWLEDGE_BASE_ID;
 const MAX_QUERY_LENGTH = 1000;
-const MODEL_ARN = `arn:aws:bedrock:${process.env.AWS_REGION}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0`;
+const MODEL_ARN = process.env.MODEL_ARN;
 
 function log(level, requestId, message) {
   const entry = {
