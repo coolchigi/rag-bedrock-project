@@ -25,9 +25,9 @@ resource "aws_iam_role" "query" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "lambda.amazonaws.com" }
-        Action = "sts:AssumeRole"
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -46,9 +46,21 @@ resource "aws_iam_role_policy" "query_bedrock" {
         Resource = var.kb_arn
       },
       {
-        Effect   = "Allow"
-        Action   = "bedrock:InvokeModel"
-        Resource = "arn:${local.partition}:bedrock:${var.config.aws_region}::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+        Effect = "Allow"
+        Action = [
+          "bedrock:InvokeModel",
+          "bedrock:GetInferenceProfile"
+        ]
+        Resource = "arn:${local.partition}:bedrock:${var.config.aws_region}:${local.account_id}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+      },
+      {
+        Effect = "Allow"
+        Action = "bedrock:InvokeModel"
+        Resource = [
+          "arn:${local.partition}:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "arn:${local.partition}:bedrock:us-east-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0",
+          "arn:${local.partition}:bedrock:us-west-2::foundation-model/anthropic.claude-sonnet-4-5-20250929-v1:0"
+        ]
       }
     ]
   })
@@ -94,6 +106,7 @@ resource "aws_lambda_function" "query" {
   environment {
     variables = {
       KNOWLEDGE_BASE_ID = var.kb_id
+      MODEL_ARN         = "arn:${local.partition}:bedrock:${var.config.aws_region}:${local.account_id}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     }
   }
 
@@ -129,9 +142,9 @@ resource "aws_iam_role" "ingest" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "lambda.amazonaws.com" }
-        Action = "sts:AssumeRole"
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -201,11 +214,11 @@ resource "aws_lambda_function" "ingest" {
 }
 
 resource "aws_lambda_permission" "s3_invoke_ingest" {
-  statement_id  = "AllowS3Invoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.ingest.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = var.bucket_arn
+  statement_id   = "AllowS3Invoke"
+  action         = "lambda:InvokeFunction"
+  function_name  = aws_lambda_function.ingest.function_name
+  principal      = "s3.amazonaws.com"
+  source_arn     = var.bucket_arn
   source_account = local.account_id
 }
 
@@ -214,7 +227,7 @@ resource "aws_s3_bucket_notification" "documents" {
 
   lambda_function {
     lambda_function_arn = aws_lambda_function.ingest.arn
-    events             = ["s3:ObjectCreated:*"]
+    events              = ["s3:ObjectCreated:*"]
   }
 
   depends_on = [aws_lambda_permission.s3_invoke_ingest]
